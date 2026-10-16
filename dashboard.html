@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <title>Fine Particulate Matter in California</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap">
 
 <!--
@@ -398,6 +398,10 @@ a { color: var(--accent); }
 
 /* ── RESPONSIVE ────────────────────────────────────────────────────────────── */
 @media (max-width: 680px) {
+  #topbar { flex-wrap: wrap; gap: 8px; }
+  #wordmark { width: 100%; }
+  #tier-switcher { width: 100%; }
+  #tier-switcher .tier-btn { flex: 1; padding: 4px 6px; }
   #main { flex-direction: column; }
   #map-wrap { height: 42vh; min-height: 200px; flex: none; }
   #panel { width: 100%; border-left: none; border-top: 1px solid var(--border); flex: 1 1 0; overflow-y: auto; }
@@ -449,6 +453,7 @@ a { color: var(--accent); }
         </div>
       </div>
 
+      <div id="map-geography" class="map-corner" style="bottom:62px;left:10px;padding:4px 9px;background:rgba(0,0,0,.75);border-radius:4px;font-size:11px;color:#fff;max-width:calc(100% - 70px)">County area-weighted means · Zoom in for block groups</div>
       <div id="map-badge" class="map-corner">2017 NEI baseline · wildfires excluded</div>
       <div id="tooltip">
         <div class="tt-geoid" id="tt-geoid"></div>
@@ -479,7 +484,7 @@ a { color: var(--accent); }
             <div class="section-label">What does this show?</div>
             <div id="plain-sentence">
               PM₂.₅ from <strong id="ps-sector">on-road vehicles</strong> across California's
-              census block groups. Darker colors mean higher estimated exposure.
+              <span id="ps-geography">counties</span>. Darker colors mean higher estimated exposure.
               Units: µg/m³.
             </div>
           </div>
@@ -1146,6 +1151,8 @@ let map = null;
 const PMTILES_PATH = 'https://pub-c7950e1623514d4498c2a90311c757cc.r2.dev/california_sector_concentrations.pmtiles';
 // CA bounding box [west, south, east, north]
 const CA_BOUNDS = [-124.48, 32.53, -114.13, 42.01];
+const BLOCK_GROUP_MIN_ZOOM = 7;
+const COUNTY_OVERVIEW_PATH = './data/county_concentrations.geojson';
 
 function initMap() {
   // Register PMTiles protocol with MapLibre
@@ -1156,9 +1163,9 @@ function initMap() {
     container: 'map',
     style: 'https://tiles.openfreemap.org/styles/dark',
     bounds: CA_BOUNDS,
-    fitBoundsOptions: { padding: 20, minZoom: 7 },
+    fitBoundsOptions: { padding: 20 },
     maxBounds: [-130, 28, -108, 46],
-    minZoom: 7,
+    minZoom: 3,
     maxZoom: 13,
   });
 
@@ -1177,9 +1184,27 @@ function initMap() {
       ? (SECTOR_MAX_ALL[currentPollutant] || SECTOR_MAX_ALL.TotalPM25)
       : (SECTOR_MAX[currentSector] || 1) * (POLL_FRAC[currentPollutant] || 1);
 
+    // Lightweight statewide overview; means are calculated from analytical
+    // block groups, before display simplification. Hide at the PMTiles threshold.
+    map.addSource('county-overview', { type: 'geojson', data: COUNTY_OVERVIEW_PATH });
+    map.addLayer({
+      id: 'county-fill', type: 'fill', source: 'county-overview',
+      maxzoom: BLOCK_GROUP_MIN_ZOOM,
+      paint: {
+        'fill-color': buildColorExpr(currentSector, domMax, currentMode === 'delta'),
+        'fill-opacity': 0.82,
+      },
+    });
+    map.addLayer({
+      id: 'county-outline', type: 'line', source: 'county-overview',
+      maxzoom: BLOCK_GROUP_MIN_ZOOM,
+      paint: { 'line-color': 'rgba(255,255,255,0.3)', 'line-width': 0.6 },
+    });
+
     // Fill layer
     map.addLayer({
       id: 'sector-fill',
+      minzoom: BLOCK_GROUP_MIN_ZOOM,
       type: 'fill',
       source: 'block-groups',
       'source-layer': 'block_groups',
@@ -1192,6 +1217,7 @@ function initMap() {
     // Outline layer (thin, shows block-group boundaries at higher zoom)
     map.addLayer({
       id: 'sector-outline',
+      minzoom: BLOCK_GROUP_MIN_ZOOM,
       type: 'line',
       source: 'block-groups',
       'source-layer': 'block_groups',
@@ -1205,9 +1231,8 @@ function initMap() {
     const ph = document.getElementById('map-placeholder');
     if (ph) ph.style.display = 'none';
 
-    // Hover tooltip
-    let hoveredId = null;
-    map.on('mousemove', 'sector-fill', e => {
+    // Both scales use the same sector values and identify their geography.
+    const showTooltip = e => {
       if (!e.features || !e.features.length) return;
       const feat = e.features[0];
       const props = feat.properties;
@@ -1226,7 +1251,10 @@ function initMap() {
       const geoid = props.GEOID || props.geoid || feat.id || '';
       const tt = document.getElementById('tooltip');
       const secLabel = DISPLAY_SECTORS.find(s => s.id === currentSector)?.label || currentSector;
-      document.getElementById('tt-geoid').textContent = geoid ? `Block group ${geoid}` : '';
+      const isCounty = props.geography === 'county';
+      document.getElementById('tt-geoid').textContent = isCounty
+        ? `${props.name} County · area-weighted mean`
+        : (geoid ? `Block group ${geoid}` : '');
       document.getElementById('tt-num').textContent = val.toFixed(3);
       document.getElementById('tt-label').textContent = `${secLabel} · ${POLL_LABEL[currentPollutant] || currentPollutant}`;
 
@@ -1242,25 +1270,30 @@ function initMap() {
       tt.style.display = 'block';
 
       map.getCanvas().style.cursor = 'crosshair';
-      if (hoveredId !== null) {
-        map.setFeatureState({ source: 'block-groups', sourceLayer: 'block_groups', id: hoveredId }, { hover: false });
-      }
-      hoveredId = feat.id;
-    });
-
-    map.on('mouseleave', 'sector-fill', () => {
-      document.getElementById('tooltip').style.display = 'none';
-      map.getCanvas().style.cursor = '';
-      if (hoveredId !== null) {
-        map.setFeatureState({ source: 'block-groups', sourceLayer: 'block_groups', id: hoveredId }, { hover: false });
-        hoveredId = null;
-      }
-    });
+    };
+    for (const layer of ['county-fill', 'sector-fill']) {
+      map.on('mousemove', layer, showTooltip);
+      map.on('mouseleave', layer, () => {
+        document.getElementById('tooltip').style.display = 'none';
+        map.getCanvas().style.cursor = '';
+      });
+    }
+    updateGeographyLabel();
+    map.on('zoom', updateGeographyLabel);
   });
 
   map.on('error', e => {
-    console.error('MapLibre error:', e);
+    console.error('MapLibre error:', e.error?.message || e.message || String(e.error || e));
   });
+}
+
+function updateGeographyLabel() {
+  const isCounty = map.getZoom() < BLOCK_GROUP_MIN_ZOOM;
+  document.getElementById('map-geography').textContent = isCounty
+    ? 'County area-weighted means · Zoom in for block groups'
+    : 'Census block-group area-weighted means';
+  document.getElementById('ps-geography').textContent = isCounty ? 'counties' : 'census block groups';
+  document.getElementById('tooltip').style.display = 'none';
 }
 
 // ── APPLY TO MAP ──────────────────────────────────────────────────────────────
@@ -1272,8 +1305,11 @@ function applyToMap() {
     : (SECTOR_MAX[currentSector] || 1) * (POLL_FRAC[currentPollutant] || 1);
 
   const isDelta = currentMode === 'delta';
-  map.setPaintProperty('sector-fill', 'fill-color',
-    buildColorExpr(currentSector, domMax, isDelta));
+  for (const layer of ['county-fill', 'sector-fill']) {
+    if (map.getLayer(layer)) {
+      map.setPaintProperty(layer, 'fill-color', buildColorExpr(currentSector, domMax, isDelta));
+    }
+  }
 }
 
 // ── ACCORDION ─────────────────────────────────────────────────────────────────
